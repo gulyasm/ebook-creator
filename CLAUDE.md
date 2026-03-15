@@ -34,8 +34,33 @@ The EPUB is saved to the same directory as the config file, named after the titl
 2. Table of contents (clickable, with ordinal numbers)
 3. For each chapter: separator page + content page
 
+## Send to Kindle
+
+Add `--send` flag to build and email the EPUB to your Kindle address:
+
+```bash
+uv run ebook_creator.py path/to/config.txt --send
+```
+
+Requires a `.env` file with:
+
+```
+KINDLE_EMAIL=yourname@kindle.com
+SMTP_USER=youremail@gmail.com
+SMTP_PASSWORD=xxxx-xxxx-xxxx-xxxx  # Gmail App Password
+```
+
+- `SMTP_PASSWORD` must be a Gmail App Password (not your account password)
+- `SMTP_USER` must be added to Amazon's approved senders list in your Kindle settings
+- See `.env.example` for setup instructions
+
 ## Dependencies (managed by uv)
 
 - `requests` — HTTP fetching
 - `ebooklib` — EPUB creation
 - `markdown` — Markdown to HTML conversion
+- `python-dotenv` — loads `.env` for Kindle credentials
+
+## Git / Publishing
+
+- `.claude/` is gitignored — local Claude Code settings only, not for the repo

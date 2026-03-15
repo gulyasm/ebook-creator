@@ -33,3 +33,6 @@ Thumbs.db
 # Project-specific
 tmp/
 *.epub
+
+# Claude Code local settings
+.claude/
