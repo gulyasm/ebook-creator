@@ -1,0 +1,11 @@
+[project]
+name = "main"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.13"
+dependencies = [
+    "ebooklib>=0.20",
+    "markdown>=3.10.2",
+    "python-dotenv>=1.2.2",
+    "requests>=2.32.5",
+]

@@ -1,0 +1,35 @@
+# Python
+*.pyc
+__pycache__/
+
+# Output files
+*.log
+*.sqlite
+/dist/
+/build/
+*.egg-info/
+
+# Virtual environment
+/venv/
+.venv/
+
+# Environment variables
+.env
+.flaskenv
+
+# Editor
+.vscode/
+.idea/
+.python-version
+
+# Installer
+*.egg
+*.whl
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project-specific
+tmp/
+*.epub
