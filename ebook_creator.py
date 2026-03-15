@@ -11,8 +11,10 @@ import re
 import smtplib
 import sys
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.message import EmailMessage
 from pathlib import Path
+from urllib.parse import urlparse
 
 import markdown
 import requests
@@ -70,7 +72,7 @@ def parse_config(config_path: Path) -> tuple[str, list[dict]]:
             continue
         if line.lower().startswith("title:"):
             title = line[6:].strip()
-        elif line.startswith("http://") or line.startswith("https://"):
+        elif urlparse(line).scheme in ("http", "https"):
             sources.append({"type": "url", "value": line})
         else:
             sources.append({"type": "path", "value": line})
@@ -89,8 +91,7 @@ def parse_config(config_path: Path) -> tuple[str, list[dict]]:
 
 def make_slug(source: str, existing: set) -> str:
     """Create a unique filesystem-safe slug from a source string."""
-    # Use the last path/URL segment
-    segment = source.rstrip("/").split("/")[-1] or source
+    segment = Path(urlparse(source).path).name or source
     base = re.sub(r"[^\w]", "_", segment)[:40].strip("_") or "chapter"
     slug = base
     i = 2
@@ -141,6 +142,14 @@ def to_html(md_text: str) -> str:
     )
 
 
+def _build_chapter(raw_md: str, slug: str, fallback: str) -> dict:
+    """Convert raw Markdown into a chapter dict."""
+    body, fm_title = strip_frontmatter(raw_md)
+    heading = extract_heading(body) or fm_title or fallback
+    html = to_html(body)
+    return {"slug": slug, "heading": heading, "html": html}
+
+
 # ---------------------------------------------------------------------------
 # Source fetching
 # ---------------------------------------------------------------------------
@@ -165,14 +174,9 @@ def fetch_url(url: str, tmp_dir: Path, slug: str) -> dict | None:
         return None
 
     # Save to tmp for debugging
-    tmp_dir.mkdir(parents=True, exist_ok=True)
     (tmp_dir / f"{slug}.md").write_text(raw_md, encoding="utf-8")
 
-    body, fm_title = strip_frontmatter(raw_md)
-    heading = extract_heading(body) or fm_title or url.split("/")[2]  # fallback: domain
-    html = to_html(body)
-
-    return {"slug": slug, "heading": heading, "html": html}
+    return _build_chapter(raw_md, slug, urlparse(url).netloc)
 
 
 def read_local(path_str: str, config_dir: Path, slug: str) -> dict | None:
@@ -187,31 +191,35 @@ def read_local(path_str: str, config_dir: Path, slug: str) -> dict | None:
 
     print(f"  Reading: {path}")
     raw_md = path.read_text(encoding="utf-8")
-    body, fm_title = strip_frontmatter(raw_md)
-    heading = extract_heading(body) or fm_title or path.stem
-    html = to_html(body)
-
-    return {"slug": slug, "heading": heading, "html": html}
+    return _build_chapter(raw_md, slug, path.stem)
 
 
 def fetch_sources(sources: list[dict], tmp_dir: Path, config_dir: Path) -> list[dict]:
     """Fetch all sources and return a list of chapter dicts."""
-    chapters = []
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    # Pre-compute slugs sequentially (make_slug mutates a shared set)
     existing_slugs: set = set()
+    items = [(source, make_slug(source["value"], existing_slugs)) for source in sources]
 
-    for source in sources:
-        slug = make_slug(source["value"], existing_slugs)
-        if source["type"] == "url":
-            chapter = fetch_url(source["value"], tmp_dir, slug)
-        else:
-            chapter = read_local(source["value"], config_dir, slug)
+    chapters_by_index: dict[int, dict | None] = {}
 
-        if chapter:
-            chapter["sep_filename"] = f"sep_{slug}.xhtml"
-            chapter["content_filename"] = f"chapter_{slug}.xhtml"
-            chapters.append(chapter)
+    # Fetch URLs in parallel
+    url_items = [(i, source, slug) for i, (source, slug) in enumerate(items) if source["type"] == "url"]
+    with ThreadPoolExecutor() as executor:
+        future_to_index = {
+            executor.submit(fetch_url, source["value"], tmp_dir, slug): i
+            for i, source, slug in url_items
+        }
+        for future in as_completed(future_to_index):
+            chapters_by_index[future_to_index[future]] = future.result()
 
-    return chapters
+    # Read local files sequentially
+    for i, (source, slug) in enumerate(items):
+        if source["type"] != "url":
+            chapters_by_index[i] = read_local(source["value"], config_dir, slug)
+
+    return [chapters_by_index[i] for i in sorted(chapters_by_index) if chapters_by_index[i]]
 
 
 # ---------------------------------------------------------------------------
@@ -267,12 +275,11 @@ def build_epub(title: str, chapters: list[dict], output_path: Path) -> None:
     book.add_item(cover_page)
 
     # TOC page
-    toc_items = ""
-    for i, ch in enumerate(chapters, 1):
-        toc_items += (
-            f'<li><span class="num">{i}.</span> '
-            f'<a href="{ch["sep_filename"]}">{ch["heading"]}</a></li>\n'
-        )
+    toc_items = "".join(
+        f'<li><span class="num">{i}.</span> '
+        f'<a href="sep_{ch["slug"]}.xhtml">{ch["heading"]}</a></li>\n'
+        for i, ch in enumerate(chapters, 1)
+    )
     toc_page = make_epub_page(
         "toc.xhtml",
         "Contents",
@@ -285,14 +292,16 @@ def build_epub(title: str, chapters: list[dict], output_path: Path) -> None:
     sep_pages = []
     content_pages = []
     for ch in chapters:
+        sep_filename = f"sep_{ch['slug']}.xhtml"
+        content_filename = f"chapter_{ch['slug']}.xhtml"
         sep = make_epub_page(
-            ch["sep_filename"],
+            sep_filename,
             ch["heading"],
             f'<div class="separator"><h1>{ch["heading"]}</h1></div>',
             css,
         )
         content = make_epub_page(
-            ch["content_filename"],
+            content_filename,
             ch["heading"],
             ch["html"],
             css,
@@ -308,7 +317,7 @@ def build_epub(title: str, chapters: list[dict], output_path: Path) -> None:
 
     # TOC structure
     book.toc = [
-        epub.Link(ch["sep_filename"], ch["heading"], ch["slug"])
+        epub.Link(f"sep_{ch['slug']}.xhtml", ch["heading"], ch["slug"])
         for ch in chapters
     ]
 
@@ -338,9 +347,12 @@ def send_to_kindle(epub_path: Path, kindle_email: str) -> None:
     msg["Subject"] = epub_path.stem
     msg.set_content("Sent via ebook-creator.")
 
-    with open(epub_path, "rb") as f:
-        msg.add_attachment(f.read(), maintype="application",
-                           subtype="epub+zip", filename=epub_path.name)
+    msg.add_attachment(
+        epub_path.read_bytes(),
+        maintype="application",
+        subtype="epub+zip",
+        filename=epub_path.name,
+    )
 
     print(f"  Sending to {kindle_email}...")
     try:
