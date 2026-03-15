@@ -2,10 +2,19 @@
 
 Converts a list of Markdown files and URLs into a Kindle-ready EPUB.
 
+## Scripts
+
+- `ebook_creator.py` — builds an EPUB from a config file
+- `raindrop_to_config.py` — generates a config from your Raindrop 'to-read' collection
+
 ## Usage
 
 ```bash
+# Build EPUB from a config file
 uv run ebook_creator.py path/to/config.txt
+
+# Generate config from Raindrop, then build EPUB in one step
+uv run ebook_creator.py $(uv run raindrop_to_config.py ~/Desktop/my-reading)
 ```
 
 ## Config format
@@ -22,7 +31,7 @@ chapters/intro.md
 
 - Lines starting with `#` are comments and are ignored
 - Empty lines are ignored
-- URL sources are fetched as `https://defuddle.md/{url}` and cached in a `tmp/` folder next to the config
+- URL sources are fetched as `https://defuddle.md/{url}` and cached in a `tmp/` folder next to the config — `defuddle.md` is an external service; content fetching fails if it is down
 
 ## Output
 
@@ -53,6 +62,16 @@ SMTP_PASSWORD=xxxx-xxxx-xxxx-xxxx  # Gmail App Password
 - `SMTP_PASSWORD` must be a Gmail App Password (not your account password)
 - `SMTP_USER` must be added to Amazon's approved senders list in your Kindle settings
 - See `.env.example` for setup instructions
+
+## Raindrop integration
+
+`raindrop_to_config.py` fetches all bookmarks from the `to-read` collection and writes a config file.
+
+Requires in `.env`:
+
+```
+RAINDROP_TOKEN=your-test-token-here  # https://app.raindrop.io/settings/integrations
+```
 
 ## Dependencies (managed by uv)
 

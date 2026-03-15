@@ -6,6 +6,8 @@ Convert a list of URLs and Markdown files into a Kindle-ready EPUB — and send 
 
 You give it a config file with a title and a list of sources. It fetches each URL (via [defuddle.md](https://defuddle.md), which strips pages down to clean readable text), reads any local Markdown files, and packages everything into a well-structured EPUB with a cover page, clickable table of contents, and a separator page before each chapter.
 
+You can also skip the config step entirely: `raindrop_to_config.py` pulls your `to-read` collection from [Raindrop.io](https://raindrop.io) and generates the config for you.
+
 ## Requirements
 
 - Python 3.13+
@@ -43,6 +45,22 @@ uv run ebook_creator.py path/to/config.txt
 ```
 
 The EPUB is saved to the same directory as the config file, named after the title (e.g. `My Reading List.epub`).
+
+### Raindrop integration
+
+Skip writing the config manually — pull your `to-read` bookmarks straight from Raindrop:
+
+```bash
+uv run ebook_creator.py $(uv run raindrop_to_config.py ~/Desktop/my-reading)
+```
+
+Add your Raindrop test token to `.env` (get it from [Raindrop integrations settings](https://app.raindrop.io/settings/integrations)):
+
+```
+RAINDROP_TOKEN=your-test-token-here
+```
+
+The script finds the collection named `to-read`, fetches all bookmark URLs, and writes a dated config file (`YYYY-MM-DD - Articles to read`) into the folder you specify.
 
 ### Config format
 
