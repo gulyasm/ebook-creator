@@ -9,12 +9,12 @@ import argparse
 import os
 import re
 import smtplib
+import subprocess
 import sys
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.message import EmailMessage
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import markdown
 import requests
@@ -147,30 +147,132 @@ def _build_chapter(raw_md: str, slug: str, fallback: str) -> dict:
     body, fm_title = strip_frontmatter(raw_md)
     heading = extract_heading(body) or fm_title or fallback
     html = to_html(body)
-    return {"slug": slug, "heading": heading, "html": html}
+    return {"slug": slug, "heading": heading, "html": html, "images": []}
+
+
+# ---------------------------------------------------------------------------
+# Image embedding
+# ---------------------------------------------------------------------------
+
+_IMG_EXTENSIONS = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/svg+xml": ".svg",
+}
+
+
+def _guess_media_type(content_type: str, url: str) -> tuple[str, str]:
+    """Return (media_type, extension) from Content-Type header or URL."""
+    ct = content_type.split(";")[0].strip().lower()
+    if ct in _IMG_EXTENSIONS:
+        return ct, _IMG_EXTENSIONS[ct]
+    # Fallback: guess from URL extension
+    ext = Path(urlparse(url).path).suffix.lower()
+    for mt, e in _IMG_EXTENSIONS.items():
+        if ext == e:
+            return mt, e
+    return "image/png", ".png"
+
+
+def _unwrap_image_proxy(url: str) -> str:
+    """Unwrap Next.js /_next/image proxy URLs to their underlying source URL."""
+    parsed = urlparse(url)
+    if "/_next/image" in parsed.path:
+        inner = parse_qs(parsed.query).get("url", [None])[0]
+        if inner:
+            return inner
+    return url
+
+
+def embed_images(chapters: list[dict]) -> list[epub.EpubImage]:
+    """Download remote images, rewrite HTML src attributes, return EpubImage items."""
+    all_images: list[epub.EpubImage] = []
+    img_counter = 0
+
+    for ch in chapters:
+        html = ch["html"]
+        img_tags = re.findall(r'<img\s[^>]*>', html)
+        for tag in img_tags:
+            src_match = re.search(r'src="([^"]+)"', tag)
+            if not src_match:
+                continue
+            src = src_match.group(1)
+            if not src.startswith(("http://", "https://")):
+                continue
+
+            download_url = _unwrap_image_proxy(src)
+
+            try:
+                resp = requests.get(download_url, timeout=15)
+                if resp.status_code != 200 or len(resp.content) == 0:
+                    raise ValueError(f"HTTP {resp.status_code}")
+            except Exception as exc:
+                print(f"  WARNING: Could not download image {src[:80]}: {exc}", file=sys.stderr)
+                html = html.replace(tag, "")
+                continue
+
+            media_type, ext = _guess_media_type(
+                resp.headers.get("content-type", ""), download_url,
+            )
+            img_counter += 1
+            file_name = f"images/img_{img_counter:04d}{ext}"
+
+            img_item = epub.EpubImage()
+            img_item.file_name = file_name
+            img_item.media_type = media_type
+            img_item.content = resp.content
+            all_images.append(img_item)
+
+            new_tag = tag.replace(f'src="{src}"', f'src="{file_name}"')
+            html = html.replace(tag, new_tag)
+
+        ch["html"] = html
+
+    return all_images
 
 
 # ---------------------------------------------------------------------------
 # Source fetching
 # ---------------------------------------------------------------------------
 
-def fetch_url(url: str, tmp_dir: Path, slug: str) -> dict | None:
-    """Fetch a URL via defuddle.md and return a chapter dict, or None on error."""
-    defuddle_url = f"https://defuddle.md/{url}"
-    print(f"  Fetching: {url}")
+def _fetch_with_defuddle_cli(url: str) -> str | None:
+    """Try fetching via local defuddle CLI. Returns markdown or None."""
     try:
-        response = requests.get(defuddle_url, timeout=20)
-    except requests.exceptions.RequestException as exc:
-        print(f"  WARNING: Could not fetch {url}: {exc}", file=sys.stderr)
+        result = subprocess.run(
+            ["npx", "defuddle", "parse", url, "--markdown"],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
         return None
-
-    if response.status_code != 200:
-        print(f"  WARNING: {url} returned HTTP {response.status_code}", file=sys.stderr)
+    if result.returncode != 0:
         return None
+    return result.stdout if result.stdout.strip() else None
 
-    raw_md = response.text
-    if not raw_md.strip():
-        print(f"  WARNING: {url} returned empty content", file=sys.stderr)
+
+def _fetch_with_defuddle_service(url: str) -> str | None:
+    """Fallback: fetch via defuddle.md web service."""
+    try:
+        response = requests.get(f"https://defuddle.md/{url}", timeout=30)
+        if response.status_code == 200 and response.text.strip():
+            return response.text
+    except requests.exceptions.RequestException:
+        pass
+    return None
+
+
+def fetch_url(url: str, tmp_dir: Path, slug: str) -> dict | None:
+    """Fetch a URL via defuddle (local CLI, then web service fallback)."""
+    print(f"  Fetching: {url}")
+
+    raw_md = _fetch_with_defuddle_cli(url)
+    if raw_md is None:
+        print(f"    Local defuddle failed, trying defuddle.md service...", file=sys.stderr)
+        raw_md = _fetch_with_defuddle_service(url)
+
+    if not raw_md or not raw_md.strip():
+        print(f"  WARNING: {url} could not be fetched", file=sys.stderr)
         return None
 
     # Save to tmp for debugging
@@ -202,24 +304,14 @@ def fetch_sources(sources: list[dict], tmp_dir: Path, config_dir: Path) -> list[
     existing_slugs: set = set()
     items = [(source, make_slug(source["value"], existing_slugs)) for source in sources]
 
-    chapters_by_index: dict[int, dict | None] = {}
+    chapters: list[dict | None] = []
+    for source, slug in items:
+        if source["type"] == "url":
+            chapters.append(fetch_url(source["value"], tmp_dir, slug))
+        else:
+            chapters.append(read_local(source["value"], config_dir, slug))
 
-    # Fetch URLs in parallel
-    url_items = [(i, source, slug) for i, (source, slug) in enumerate(items) if source["type"] == "url"]
-    with ThreadPoolExecutor() as executor:
-        future_to_index = {
-            executor.submit(fetch_url, source["value"], tmp_dir, slug): i
-            for i, source, slug in url_items
-        }
-        for future in as_completed(future_to_index):
-            chapters_by_index[future_to_index[future]] = future.result()
-
-    # Read local files sequentially
-    for i, (source, slug) in enumerate(items):
-        if source["type"] != "url":
-            chapters_by_index[i] = read_local(source["value"], config_dir, slug)
-
-    return [chapters_by_index[i] for i in sorted(chapters_by_index) if chapters_by_index[i]]
+    return [ch for ch in chapters if ch]
 
 
 # ---------------------------------------------------------------------------
@@ -251,10 +343,18 @@ def make_epub_page(file_name: str, title: str, body: str, css: epub.EpubItem) ->
 
 def build_epub(title: str, chapters: list[dict], output_path: Path) -> None:
     """Assemble and write the EPUB file."""
+    print(f"Downloading and embedding images...")
+    image_items = embed_images(chapters)
+
     book = epub.EpubBook()
     book.set_identifier(str(uuid.uuid4()))
     book.set_title(title)
     book.set_language("en")
+    book.add_author("ebook-creator")
+
+    for img in image_items:
+        book.add_item(img)
+    print(f"  Embedded {len(image_items)} image(s)")
 
     # Stylesheet
     css = epub.EpubItem(
@@ -386,6 +486,13 @@ def main() -> None:
 
         if not chapters:
             raise EbookError("No chapters could be loaded. Aborting.")
+
+        failed = len(sources) - len(chapters)
+        if failed:
+            raise EbookError(
+                f"{failed} of {len(sources)} source(s) failed to load. "
+                f"Only {len(chapters)} chapter(s) were built. Aborting to avoid an incomplete ebook."
+            )
 
         safe_title = re.sub(r"[^\w\s-]", "", title).strip()
         output_path = config_dir / f"{safe_title}.epub"

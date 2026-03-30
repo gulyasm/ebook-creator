@@ -80,6 +80,11 @@ RAINDROP_TOKEN=your-test-token-here  # https://app.raindrop.io/settings/integrat
 - `markdown` — Markdown to HTML conversion
 - `python-dotenv` — loads `.env` for Kindle credentials
 
+## Gotchas
+
+- **Images must be embedded**: EPUB readers like Kindle and Apple Books reject EPUBs with remote `<img src="https://...">` URLs. All images must be downloaded and embedded inside the archive. Calibre tolerates remote URLs, so always test with Kindle/Apple Books.
+- **Author metadata is required**: The EPUB must include `dc:creator` (author). Kindle and Apple Books reject EPUBs without it; Calibre does not.
+
 ## Git / Publishing
 
 - `.claude/` is gitignored — local Claude Code settings only, not for the repo

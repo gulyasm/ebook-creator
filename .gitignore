@@ -34,5 +34,8 @@ Thumbs.db
 tmp/
 *.epub
 
+# Node
+node_modules/
+
 # Claude Code local settings
 .claude/
