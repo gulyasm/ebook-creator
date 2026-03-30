@@ -6,6 +6,7 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import re
 import smtplib
@@ -237,26 +238,34 @@ def embed_images(chapters: list[dict]) -> list[epub.EpubImage]:
 # Source fetching
 # ---------------------------------------------------------------------------
 
-def _fetch_with_defuddle_cli(url: str) -> str | None:
-    """Try fetching via local defuddle CLI. Returns markdown or None."""
+def _fetch_with_defuddle_cli(url: str) -> tuple[str, str | None] | None:
+    """Try fetching via local defuddle CLI. Returns (markdown, title) or None."""
     try:
         result = subprocess.run(
-            ["npx", "defuddle", "parse", url, "--markdown"],
+            ["npx", "defuddle", "parse", url, "--json", "--markdown"],
             capture_output=True, text=True, timeout=60,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return None
     if result.returncode != 0:
         return None
-    return result.stdout if result.stdout.strip() else None
+    try:
+        data = json.loads(result.stdout)
+        content = data.get("content", "")
+        title = data.get("title") or None
+        if content.strip():
+            return content, title
+    except json.JSONDecodeError:
+        pass
+    return None
 
 
-def _fetch_with_defuddle_service(url: str) -> str | None:
-    """Fallback: fetch via defuddle.md web service."""
+def _fetch_with_defuddle_service(url: str) -> tuple[str, str | None] | None:
+    """Fallback: fetch via defuddle.md web service. Returns (markdown, title) or None."""
     try:
         response = requests.get(f"https://defuddle.md/{url}", timeout=30)
         if response.status_code == 200 and response.text.strip():
-            return response.text
+            return response.text, None
     except requests.exceptions.RequestException:
         pass
     return None
@@ -266,19 +275,21 @@ def fetch_url(url: str, tmp_dir: Path, slug: str) -> dict | None:
     """Fetch a URL via defuddle (local CLI, then web service fallback)."""
     print(f"  Fetching: {url}")
 
-    raw_md = _fetch_with_defuddle_cli(url)
-    if raw_md is None:
+    result = _fetch_with_defuddle_cli(url)
+    if result is None:
         print(f"    Local defuddle failed, trying defuddle.md service...", file=sys.stderr)
-        raw_md = _fetch_with_defuddle_service(url)
+        result = _fetch_with_defuddle_service(url)
 
-    if not raw_md or not raw_md.strip():
+    if result is None:
         print(f"  WARNING: {url} could not be fetched", file=sys.stderr)
         return None
+
+    raw_md, title = result
 
     # Save to tmp for debugging
     (tmp_dir / f"{slug}.md").write_text(raw_md, encoding="utf-8")
 
-    return _build_chapter(raw_md, slug, urlparse(url).netloc)
+    return _build_chapter(raw_md, slug, title or urlparse(url).netloc)
 
 
 def read_local(path_str: str, config_dir: Path, slug: str) -> dict | None:
