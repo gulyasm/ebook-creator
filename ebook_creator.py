@@ -433,7 +433,7 @@ def build_epub(title: str, chapters: list[dict], output_path: Path) -> None:
     ]
 
     # Spine
-    spine = [cover_page, "nav", toc_page]
+    spine = [cover_page, toc_page]
     for sep, content in zip(sep_pages, content_pages):
         spine.append(sep)
         spine.append(content)
