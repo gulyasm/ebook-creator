@@ -8,4 +8,5 @@ dependencies = [
     "markdown>=3.10.2",
     "python-dotenv>=1.2.2",
     "requests>=2.32.5",
+    "trafilatura>=2.0.0",
 ]

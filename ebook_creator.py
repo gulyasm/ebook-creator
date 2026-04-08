@@ -273,14 +273,61 @@ def _fetch_with_defuddle_service(url: str) -> tuple[str, str | None] | None:
     return None
 
 
+def _fetch_with_jina_reader(url: str) -> tuple[str, str | None] | None:
+    """Fallback: fetch via Jina Reader. Returns (markdown, title) or None."""
+    try:
+        response = requests.get(
+            f"https://r.jina.ai/{url}",
+            headers={"Accept": "text/markdown"},
+            timeout=30,
+        )
+        if response.status_code == 200 and response.text.strip():
+            return response.text, None
+    except requests.exceptions.RequestException:
+        pass
+    return None
+
+
+def _fetch_with_trafilatura(url: str) -> tuple[str, str | None] | None:
+    """Fallback: fetch and extract via trafilatura. Returns (markdown, title) or None."""
+    import trafilatura
+
+    downloaded = trafilatura.fetch_url(url)
+    if not downloaded:
+        return None
+    content = trafilatura.extract(
+        downloaded, output_format="markdown", include_links=True,
+    )
+    if not content or not content.strip():
+        return None
+    metadata = trafilatura.extract(downloaded, output_format="xmltei")
+    title = None
+    if metadata:
+        import re as _re
+        m = _re.search(r"<title[^>]*>([^<]+)</title>", metadata)
+        if m:
+            title = m.group(1).strip()
+    return content, title
+
+
+_FALLBACKS = [
+    ("defuddle CLI", _fetch_with_defuddle_cli),
+    ("defuddle.md", _fetch_with_defuddle_service),
+    ("Jina Reader", _fetch_with_jina_reader),
+    ("trafilatura", _fetch_with_trafilatura),
+]
+
+
 def fetch_url(url: str, tmp_dir: Path, slug: str) -> dict | None:
-    """Fetch a URL via defuddle (local CLI, then web service fallback)."""
+    """Fetch a URL using a chain of fallback extractors."""
     print(f"  Fetching: {url}")
 
-    result = _fetch_with_defuddle_cli(url)
-    if result is None:
-        print(f"    Local defuddle failed, trying defuddle.md service...", file=sys.stderr)
-        result = _fetch_with_defuddle_service(url)
+    result = None
+    for name, fetcher in _FALLBACKS:
+        result = fetcher(url)
+        if result is not None:
+            break
+        print(f"    {name} failed", file=sys.stderr)
 
     if result is None:
         print(f"  WARNING: {url} could not be fetched", file=sys.stderr)
