@@ -143,9 +143,11 @@ def to_html(md_text: str) -> str:
     )
 
 
-def _build_chapter(raw_md: str, slug: str, fallback: str) -> dict:
-    """Convert raw Markdown into a chapter dict."""
+def _build_chapter(raw_md: str, slug: str, fallback: str) -> dict | None:
+    """Convert raw Markdown into a chapter dict, or None if body is empty."""
     body, fm_title = strip_frontmatter(raw_md)
+    if not body.strip():
+        return None
     heading = extract_heading(body) or fm_title or fallback
     html = to_html(body)
     return {"slug": slug, "heading": heading, "html": html, "images": []}
@@ -289,7 +291,10 @@ def fetch_url(url: str, tmp_dir: Path, slug: str) -> dict | None:
     # Save to tmp for debugging
     (tmp_dir / f"{slug}.md").write_text(raw_md, encoding="utf-8")
 
-    return _build_chapter(raw_md, slug, title or urlparse(url).netloc)
+    chapter = _build_chapter(raw_md, slug, title or urlparse(url).netloc)
+    if chapter is None:
+        print(f"  WARNING: {url} returned empty content", file=sys.stderr)
+    return chapter
 
 
 def read_local(path_str: str, config_dir: Path, slug: str) -> dict | None:
@@ -307,22 +312,22 @@ def read_local(path_str: str, config_dir: Path, slug: str) -> dict | None:
     return _build_chapter(raw_md, slug, path.stem)
 
 
-def fetch_sources(sources: list[dict], tmp_dir: Path, config_dir: Path) -> list[dict]:
-    """Fetch all sources and return a list of chapter dicts."""
+def fetch_sources(sources: list[dict], tmp_dir: Path, config_dir: Path) -> tuple[list[dict], list[dict | None]]:
+    """Fetch all sources and return (successful chapters, all results including None for failures)."""
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
     # Pre-compute slugs sequentially (make_slug mutates a shared set)
     existing_slugs: set = set()
     items = [(source, make_slug(source["value"], existing_slugs)) for source in sources]
 
-    chapters: list[dict | None] = []
+    all_results: list[dict | None] = []
     for source, slug in items:
         if source["type"] == "url":
-            chapters.append(fetch_url(source["value"], tmp_dir, slug))
+            all_results.append(fetch_url(source["value"], tmp_dir, slug))
         else:
-            chapters.append(read_local(source["value"], config_dir, slug))
+            all_results.append(read_local(source["value"], config_dir, slug))
 
-    return [ch for ch in chapters if ch]
+    return [ch for ch in all_results if ch], all_results
 
 
 # ---------------------------------------------------------------------------
@@ -493,17 +498,19 @@ def main() -> None:
         tmp_dir = config_dir / "tmp"
 
         print(f'Building "{title}" from {len(sources)} source(s)...')
-        chapters = fetch_sources(sources, tmp_dir, config_dir)
+        chapters, all_results = fetch_sources(sources, tmp_dir, config_dir)
 
         if not chapters:
             raise EbookError("No chapters could be loaded. Aborting.")
 
-        failed = len(sources) - len(chapters)
-        if failed:
-            raise EbookError(
-                f"{failed} of {len(sources)} source(s) failed to load. "
-                f"Only {len(chapters)} chapter(s) were built. Aborting to avoid an incomplete ebook."
-            )
+        failed_urls = [
+            s["value"] for s, ch in zip(sources, all_results)
+            if ch is None and s["type"] == "url"
+        ]
+        if failed_urls:
+            print(f"WARNING: {len(failed_urls)} source(s) could not be fetched, skipping them.", file=sys.stderr)
+            for url in failed_urls:
+                print(f"FAILED_URL: {url}")
 
         safe_title = re.sub(r"[^\w\s-]", "", title).strip()
         output_path = config_dir / f"{safe_title}.epub"
