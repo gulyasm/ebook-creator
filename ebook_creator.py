@@ -12,6 +12,7 @@ import re
 import smtplib
 import subprocess
 import sys
+import time
 import uuid
 from email.message import EmailMessage
 from pathlib import Path
@@ -21,6 +22,9 @@ import markdown
 import requests
 from dotenv import load_dotenv
 from ebooklib import epub
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
 
 # ---------------------------------------------------------------------------
 # CSS
@@ -404,8 +408,8 @@ def make_epub_page(file_name: str, title: str, body: str, css: epub.EpubItem) ->
 # EPUB assembly
 # ---------------------------------------------------------------------------
 
-def build_epub(title: str, chapters: list[dict], output_path: Path) -> None:
-    """Assemble and write the EPUB file."""
+def build_epub(title: str, chapters: list[dict], output_path: Path) -> int:
+    """Assemble and write the EPUB file. Returns the number of images embedded."""
     print(f"Downloading and embedding images...")
     image_items = embed_images(chapters)
 
@@ -492,6 +496,64 @@ def build_epub(title: str, chapters: list[dict], output_path: Path) -> None:
     book.spine = spine
 
     epub.write_epub(str(output_path), book, {})
+    return len(image_items)
+
+
+# ---------------------------------------------------------------------------
+# Summary report
+# ---------------------------------------------------------------------------
+
+def _format_duration(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, secs = divmod(int(round(seconds)), 60)
+    if minutes < 60:
+        return f"{minutes}m {secs}s"
+    hours, mins = divmod(minutes, 60)
+    return f"{hours}h {mins}m {secs}s"
+
+
+def print_summary(
+    *,
+    processed: int,
+    failed: list[dict],
+    images: int,
+    elapsed: float,
+    output: Path,
+) -> None:
+    """Render an end-of-run summary using rich."""
+    console = Console()
+
+    stats = Table.grid(padding=(0, 2))
+    stats.add_column(justify="right", style="bold")
+    stats.add_column()
+    stats.add_row("Articles processed", f"[green]{processed}[/green]")
+    stats.add_row(
+        "Articles failed",
+        f"[red]{len(failed)}[/red]" if failed else "[green]0[/green]",
+    )
+    stats.add_row("Images downloaded", f"[cyan]{images}[/cyan]")
+    stats.add_row("Time elapsed", _format_duration(elapsed))
+    stats.add_row("Output", str(output))
+
+    console.print()
+    console.print(
+        Panel(stats, title="[bold]Ebook build summary[/bold]", border_style="blue")
+    )
+
+    if failed:
+        fail_table = Table(
+            title="Failed sources",
+            show_header=True,
+            header_style="bold red",
+            border_style="red",
+        )
+        fail_table.add_column("#", style="dim", justify="right")
+        fail_table.add_column("Type")
+        fail_table.add_column("Source", overflow="fold")
+        for i, src in enumerate(failed, 1):
+            fail_table.add_row(str(i), src["type"], src["value"])
+        console.print(fail_table)
 
 
 # ---------------------------------------------------------------------------
@@ -538,6 +600,8 @@ def main() -> None:
                         help="Send the EPUB to Kindle after building")
     args = parser.parse_args()
 
+    start = time.perf_counter()
+
     try:
         config_path = Path(args.config).resolve()
         title, sources = parse_config(config_path)
@@ -550,20 +614,15 @@ def main() -> None:
         if not chapters:
             raise EbookError("No chapters could be loaded. Aborting.")
 
-        failed_urls = [
-            s["value"] for s, ch in zip(sources, all_results)
-            if ch is None and s["type"] == "url"
+        failed_sources = [
+            s for s, ch in zip(sources, all_results) if ch is None
         ]
-        if failed_urls:
-            print(f"WARNING: {len(failed_urls)} source(s) could not be fetched, skipping them.", file=sys.stderr)
-            for url in failed_urls:
-                print(f"FAILED_URL: {url}")
 
         safe_title = re.sub(r"[^\w\s-]", "", title).strip()
         output_path = config_dir / f"{safe_title}.epub"
 
         print(f"Assembling EPUB ({len(chapters)} chapter(s))...")
-        build_epub(title, chapters, output_path)
+        image_count = build_epub(title, chapters, output_path)
         print(f"Done: {output_path}")
 
         if args.send:
@@ -572,6 +631,14 @@ def main() -> None:
                 raise EbookError("KINDLE_EMAIL is not set in .env")
             send_to_kindle(output_path, kindle_email)
             print(f"Sent to Kindle: {kindle_email}")
+
+        print_summary(
+            processed=len(chapters),
+            failed=failed_sources,
+            images=image_count,
+            elapsed=time.perf_counter() - start,
+            output=output_path,
+        )
 
     except EbookError as exc:
         print(f"Error: {exc}", file=sys.stderr)
